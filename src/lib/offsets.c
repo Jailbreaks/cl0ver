@@ -6,7 +6,7 @@
 #include <string.h>             // memcpy, strerror
 
 #include "common.h"             // DEBUG, MIN, addr_t, mach_*
-#include "device.h"             // get_model, get_os_version
+#include "device.h"             // M_*, V_*, get_model, get_os_version
 #include "find.h"               // find_all_offsets
 #include "slide.h"              // get_kernel_slide
 #include "try.h"                // THROW, TRY, FINALLY
@@ -15,10 +15,22 @@
 #include "offsets.h"
 
 #define CACHE_VERSION 2
+#ifdef __LP64__
+    bool dump_full_kernel = false;
+    addr_t kernel_base = 0xffffff8004004000;
+#else
+    addr_t kernel_base = 0x80001000;
+#endif
 offsets_t offsets;
 static addr_t anchor = 0,
               vtab   = 0;
-static bool initialized = false;
+static bool initialized = false,
+            new_payload = false;
+
+bool use_new_payload(void)
+{
+    return new_payload;
+}
 
 static addr_t reg_anchor(void)
 {
@@ -26,9 +38,33 @@ static addr_t reg_anchor(void)
     switch(get_model() | get_os_version())
     {
 #ifdef __LP64__
-        case M_N61AP  | V_13A452:
+        case M_J81AP  | V_13A452:
         case M_J97AP  | V_13A404:
+        case M_N56AP  | V_13A452:
+        case M_N61AP  | V_13A452:
             return 0xffffff800454a000;
+        case M_J71AP  | V_13A452:
+        case M_J72AP  | V_13A452:
+        case M_J85AP  | V_13A452:
+        case M_N51AP  | V_13A452:
+        case M_N53AP  | V_13A452:
+        case M_N66AP  | V_13A342:
+        case M_N66AP  | V_13A405:
+        case M_N66AP  | V_13A452:
+        case M_N66mAP | V_13A342:
+        case M_N66mAP | V_13A405:
+        case M_N66mAP | V_13A452:
+        case M_N71AP  | V_13A342:
+        case M_N71AP  | V_13A405:
+        case M_N71AP  | V_13A452:
+        case M_N71mAP | V_13A342:
+        case M_N71mAP | V_13A405:
+        case M_N71mAP | V_13A452:
+            return 0xffffff800453e000;
+        case M_N56AP  | V_13G34:
+        case M_N61AP  | V_13G34:
+            return 0xffffff8004542000;
+        case M_N66AP  | V_13G34:
         case M_N69AP  | V_13G34:
         case M_N71AP  | V_13G34:
             return 0xffffff8004536000;
@@ -41,6 +77,8 @@ static addr_t reg_anchor(void)
         case M_N78AP  | V_13F69:
         case M_N78aAP | V_13F69:
             return 0x800a744b;
+        case M_N94AP  | V_13A452:
+            return 0x800a78b3;
 #endif
         default: THROW("Unsupported device/OS combination");
     }
@@ -52,9 +90,33 @@ static addr_t reg_vtab(void)
     switch(get_model() | get_os_version())
     {
 #ifdef __LP64__
-        case M_N61AP  | V_13A452:
+        case M_J81AP  | V_13A452:
         case M_J97AP  | V_13A404:
+        case M_N56AP  | V_13A452:
+        case M_N61AP  | V_13A452:
             return 0xffffff8004503168;
+        case M_J71AP  | V_13A452:
+        case M_J72AP  | V_13A452:
+        case M_J85AP  | V_13A452:
+        case M_N51AP  | V_13A452:
+        case M_N53AP  | V_13A452:
+        case M_N66AP  | V_13A342:
+        case M_N66AP  | V_13A405:
+        case M_N66AP  | V_13A452:
+        case M_N66mAP | V_13A342:
+        case M_N66mAP | V_13A405:
+        case M_N66mAP | V_13A452:
+        case M_N71AP  | V_13A342:
+        case M_N71AP  | V_13A405:
+        case M_N71AP  | V_13A452:
+        case M_N71mAP | V_13A342:
+        case M_N71mAP | V_13A405:
+        case M_N71mAP | V_13A452:
+            return 0xffffff80044f7168;
+        case M_N56AP  | V_13G34:
+        case M_N61AP  | V_13G34:
+            return 0xffffff80044fb1f0;
+        case M_N66AP  | V_13G34:
         case M_N69AP  | V_13G34:
         case M_N71AP  | V_13G34:
             return 0xffffff80044ef1f0;
@@ -67,6 +129,8 @@ static addr_t reg_vtab(void)
         case M_N78AP  | V_13F69:
         case M_N78aAP | V_13F69:
             return 0x803ece94;
+        case M_N94AP  | V_13A452:
+            return 0x803ede50;
 #endif
         default: THROW("Unsupported device/OS combination");
     }
@@ -121,7 +185,43 @@ void off_cfg(const char *dir)
                     {
                         DEBUG("Anchor: " ADDR ", Vtab (unslid): " ADDR, a, v);
                         anchor = a;
-                        vtab   = v + get_kernel_slide();
+                        vtab   = v;
+                        if(anchor != 0 && vtab != 0) // uninitialised
+                        {
+                            vtab += get_kernel_slide();
+                        }
+
+                        bool got_payload = false;
+                        addr_t base = 0;
+                        if(fscanf(f_cfg, "\n" ADDR, &base) == 1)
+                        {
+                            if(base != 0)
+                            {
+                                kernel_base = base;
+                            }
+
+                            uint8_t override = 0;
+                            if(fscanf(f_cfg, "\noverride=%hhu", &override) == 1)
+                            {
+                                if(override == 90 || override == 92)
+                                {
+                                    new_payload = override == 92;
+                                    got_payload = true;
+                                }
+#ifdef __LP64__
+                                int n = 0;
+                                fscanf(f_cfg, "\nfull_dump%n", &n);
+                                if(n > 0)
+                                {
+                                    dump_full_kernel = true;
+                                }
+#endif
+                            }
+                        }
+                        if(!got_payload)
+                        {
+                            new_payload = get_os_version() >= V_13C75; // 9.2
+                        }
                     }
                     else
                     {
@@ -267,7 +367,7 @@ void off_init(const char *dir)
                                     break;
                             }
                         }
-                        delta = kslide - (base - KERNEL_BASE);
+                        delta = kslide - (base - kernel_base);
                     }
                     else
                     {
